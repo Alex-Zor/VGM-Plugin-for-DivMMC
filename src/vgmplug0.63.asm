@@ -59,10 +59,20 @@ CMD_END:                EQU $66                         ;
 CMD_AY8910:             EQU $A0                         ;
 CMD_SAA1099:            equ $BD                         ;
                                                         ;
+;=================== chips_mask ========================;
+; Битовая маска чипов, объявленных в заголовке VGM      ;
+; (собирается в rd_header, используется в sound_off).   ;
+MSK_OPL:                EQU 1                           ; YM3812/YMF262
+MSK_AY:                 EQU 2                           ; AY-3-8910
+MSK_SN:                 EQU 4                           ; SN76489 (+2x)
+MSK_YM2203:             EQU 8                           ; YM2203 (+2x)
+MSK_SAA:                EQU 16                          ; SAA1099 (+2x)
+MSK_YM2413:             EQU 32                          ; YM2413
+                                                        ;
 ;====================== ENTRY ==========================;
 entry_point:                                            ;
                 jr      start                           ;
-                db      " < ver0.62 by AlexZor > "      ;
+                db      " < ver0.63 by AlexZor > "      ;
 ; ======================================================;
                                                         ;
 ; ТОЧКА ВХОДА ПЛАГИНА esxDOS.                           ;
@@ -551,6 +561,30 @@ rd_header:
                 call    print
                                                         ;
                 call    view_size
+;---- собрать маску ВСЕХ чипов, объявленных в заголовке -;
+; Парсер играет команды всех чипов файла, а curr_chip -  ;
+; только один (для строки "Chip:" и детекта). sound_off  ;
+; глушит по этой маске, иначе мультичиповый VGM (напр.   ;
+; Robocop: YM2203+YM3812) оставляет второй чип звучать   ;
+; после выхода - "зависшая нота".                        ;
+                xor     a                               ;
+                ld      (chips_mask), a                 ;
+                ld      ix, mask_tbl                    ;
+                ld      d, 7                            ; записей в таблице
+bmask_loop:
+                ld      c, (ix+0)                       ; offset поля клока
+                ld      b, (ix+1)                       ;
+                call    not_zero                        ; Z=1 - клок нулевой
+                jr      z, bmask_next                   ;
+                ld      a, (chips_mask)                 ;
+                or      (ix+2)                          ; добавить бит чипа
+                ld      (chips_mask), a                 ;
+bmask_next:
+                inc     ix                              ;
+                inc     ix                              ;
+                inc     ix                              ;
+                dec     d                               ;
+                jr      nz, bmask_loop                  ;
 ;-------------------------------------------------------;
                 ld      a, 6
                 ld      (curr_chip), a
@@ -971,31 +1005,54 @@ loc_0023:
                 call    print
                 ret
                                                         ;
+; --- таблица для rd_header: offset 4-байтового поля клока ;
+; в заголовке VGM + бит чипа для chips_mask ---           ;
+mask_tbl:
+                dw      10h
+                db      MSK_YM2413
+                dw      0Ch
+                db      MSK_SN
+                dw      44h
+                db      MSK_YM2203
+                dw      50h
+                db      MSK_OPL
+                dw      5Ch
+                db      MSK_OPL
+                dw      74h
+                db      MSK_AY
+                dw      0C8h
+                db      MSK_SAA
+                                                        ;
 ;============ Reset all soundchip registers ============;
-; ГЛУШЕНИЕ ЗВУКОЧИПА (вызывается при остановке/смене трека).
-; Диспетчер по curr_chip: 1-OPL_reset, 2-AY_reset,
-; 3-SN76489_reset, 4-YM2203_reset, 5-SAA_reset, 6-YM2413_reset.
-; Для неизвестного/неподдерживаемого чипа (0) просто выходит.
+; ГЛУШЕНИЕ ЗВУКОЧИПОВ (вызывается при остановке/смене трека).
+; Глушатся ВСЕ чипы, объявленные в заголовке файла       ;
+; (chips_mask из rd_header), а не только curr_chip:      ;
+; парсер играет команды всех чипов, и мультичиповый VGM  ;
+; иначе оставлял второй чип звучать после выхода.        ;
+; Каждый *_reset пишет только в порты чипа, который файл ;
+; реально использует - новых побочных обращений к портам ;
+; (ULA/#7FFD на частичном декоде #C0/#C4) не появляется. ;
 ; ======================================================;
 sound_off:
-                ld      a, (curr_chip)
-                cp      1
-                jp      z, OPL_reset                    ; OPL reset
-                cp      2
-                jp      z, AY_reset                     ; AY_reset
-                cp      3
-                jp      z, SN76489_reset                ; SN76489_reset
-                cp      4
-                jp      z, YM2203_reset                 ; YM2203_reset
-                cp      5
-                jp      z, SAA_reset                    ; SAA_reset
-                cp      6
-                jp      z, YM2413_reset                 ; YM2413_reset
-                cp      7
-                jp      z, SAA_reset                    ; SAA_reset (2xSAA1099)
-                cp      8
-                jp      z, SN76489_reset                 ; SN76489_reset (2xSN76489)
-                ret
+                ld      a, (chips_mask)                 ;
+                and     MSK_YM2413                      ;
+                call    nz, YM2413_reset                ;
+                ld      a, (chips_mask)                 ;
+                and     MSK_YM2203                      ;
+                call    nz, YM2203_reset                ;
+                ld      a, (chips_mask)                 ;
+                and     MSK_SAA                         ;
+                call    nz, SAA_reset                   ; глушит оба SAA
+                ld      a, (chips_mask)                 ;
+                and     MSK_OPL                         ;
+                call    nz, OPL_reset                   ;
+                ld      a, (chips_mask)                 ;
+                and     MSK_SN                          ;
+                call    nz, SN76489_reset               ; оба SN, проваливается в AY_reset
+                ld      a, (chips_mask)                 ;
+                and     MSK_AY                          ;
+                call    nz, AY_reset                    ;
+                ret                                     ;
 ; --- глушение SN76489/SN76496: сброс регистров громкости всех
 ; 4 каналов (тон 0-2 и шум) через порт SN76489_ADDR (0xC9) ---
 ; Гасятся оба чипа (SN76489_ADDR и SN76489_ADDR2=$C2) - запись во
@@ -1573,7 +1630,8 @@ track:                  ds 35                           ;
 game:                   ds 35                           ;
 bar:                    ds 29                           ;
 curr_chip:              db 0                            ;
-txt_title:              db $80, $84, $84, $84, $84, $84, $84, $84, $84, $84,$84, $84, " VGM Player 0.62bis " , $84,$84,$84,$84,$84,$84,$84,$84,$84,$81,0;
+chips_mask:             db 0                            ; биты MSK_* - чипы файла
+txt_title:              db $80, $84, $84, $84, $84, $84, $84, $84, $84, $84,$84, $84, " VGM Player 0.63 " , $84,$84,$84,$84,$84,$84,$84,$84,$84,$84,$84,$84,$81,0;
 txt_file:               db $87, "File:                                   ", $85,0;
 txt_chip:               db $87, "Chip:                                   ", $85,0;
 txt_ctr:                db $87, "          Space-next,   Q-quit          ", $85,0;
