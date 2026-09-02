@@ -25,14 +25,18 @@
       multi-chip files (e.g. Robocop, YM2203+YM3812) no longer
       leave a hanging note after quitting the player.
       YM2203 fix for FPGA implementations that use the canonical
-      chip-select values on port #FFFD: a single $FB write
-      (chip 1, FM on) before playing a YM2203 track un-gates the
-      FM part (clears FM_DIS), and the mute routine now writes
-      the canonical selects $FB/$FA before silencing each chip.
-      The plugin-style #F0/#F1 selects are kept as-is, so
-      hardware and emulators that understand them are unaffected
-      (note: the meaning of bit 0 in the canonical selects is
-      opposite to the plugin-style ones).
+      chip-select values on port #FFFD: VGM commands 0x55/0xA5
+      now emit the canonical select first ($FB = chip 1,
+      $FA = chip 2; f=0 un-gates the FM part / clears FM_DIS)
+      followed by the plugin-style select (#F0/#F1), so
+      2xYM2203 files address both chips correctly on either
+      kind of hardware. $FB is also written once before playback
+      of a YM2203 file starts, and the mute routine writes the
+      canonical selects $FB/$FA before silencing each chip.
+      Hardware and emulators that only understand #F0/#F1 still
+      get those selects last and are unaffected (note: the
+      meaning of bit 0 in the canonical selects is opposite to
+      the plugin-style ones).
     0.62 (1 September 2026, by azesmbog)
       Added SAA1099 / 2x SAA1099 (VGM cmd 0xBD, ports #01FF/#00FF
       and #03FF/#02FF), YM2413 (cmd 0x51, ports #C0/#C1) and
