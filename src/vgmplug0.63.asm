@@ -69,6 +69,43 @@ MSK_YM2203:             EQU 8                           ; YM2203 (+2x)
 MSK_SAA:                EQU 16                          ; SAA1099 (+2x)
 MSK_YM2413:             EQU 32                          ; YM2413
                                                         ;
+;=============== Пересчёт клока YM2203 ==================;
+; Аркадные VGM логированы для другого клока YM2203 (напр. 1943 -
+; 1.5 МГц), а TSFM гонит чип на HW_CLOCK: всё звучит на октаву с
+; лишним выше. При chips_mask&YM2203 и отличии клока файла
+; (заголовок +0x44) от HW_CLOCK больше ~3% включается пересчёт:
+; частотные регистры на лету масштабируются на отношение клоков.
+;   FM  (A0-A6, A8-AE): freq ~ fnum*2^block*clock, поэтому
+;       fnum' = fnum*mant_fm, block' = block+exp_fm, где
+;       Cf/HW = mant_fm * 2^exp_fm (мантисса 0.16, [0.5..1)).
+;   SSG (R0-R5 периоды тона, R6 шум, R11/R12 огибающая):
+;       период ~ clock/freq, поэтому T' = T*mant_sg*2^exp_sg,
+;       где HW/Cf = mant_sg * 2^exp_sg.
+; Умножение на мантиссу - таблицей: TBL[i] = (i*mant+128)>>8
+; (256 записей по 16 бит), тогда V*mant>>16 = (TBL[V>>8]*256
+; + TBL[V&255])>>8. Таблицы строятся при разборе заголовка.
+; Регистры пишутся парами (младший+старший), для этого ведутся
+; тени файловых значений по обоим чипам (латчи A4-A6/AC-AE,
+; SSG R0-R5, R11-R12).
+HW_CLOCK:               EQU 3546800                     ; клок YM2203 на TSFM (2x1773400)
+CONV_TFM:               EQU $9300                       ; таблица мантиссы FM (512 байт)
+CONV_TSG:               EQU $9500                       ; таблица мантиссы SSG (512 байт)
+conv_on:                EQU $9700                       ; 1 - пересчёт включён
+conv_ef:                EQU $9701                       ; exp_fm (знаковый)
+conv_es:                EQU $9702                       ; exp_sg (знаковый)
+cur_ofs:                EQU $9703                       ; 0/16 - смещение теней текущего чипа
+cnv_reg:                EQU $9704                       ; регистр текущей команды
+cnv_dat:                EQU $9705                       ; данные текущей команды
+cnv_mant:               EQU $9706                       ; 2 байта: мантисса (0.16)
+cnv_q:                  EQU $9708                       ; 3 байта: частное деления
+cnv_dvd:                EQU $970B                       ; 5 байт: делимое (X<<16)
+cnv_dvs:                EQU $9710                       ; 3 байта: делитель
+cnv_acc:                EQU $9713                       ; 3 байта: остаток/аккумулятор
+cnv_cf:                 EQU $9716                       ; 3 байта: клок файла
+cnv_blk:                EQU $9719                       ; block текущей FM-записи
+cnv_shad:               EQU $9720                       ; 2x16 байт теней (чип1/чип2):
+; +0..+5 SSG R0-R5, +6/+7 R11/R12, +8..+10 латчи A4-A6, +11..+13 латчи AC-AE
+                                                        ;
 ;====================== ENTRY ==========================;
 entry_point:                                            ;
                 jr      start                           ;
@@ -194,10 +231,10 @@ parser:                                                 ;
                 jr      z, loc_0001                     ;
                                                         ;
                 cp      CMD_SN76489                     ;  PSG (SN76489/SN76496)
-                jr      z,  wr_SN76489                  ;
+                jp      z,  wr_SN76489                  ;
                                                         ;
                 cp      CMD_SN76489_2                   ;  PSG, 2-й чип (VGM cmd 0x30)
-                jr      z,  wr_SN76489_2                ;
+                jp      z,  wr_SN76489_2                ;
                                                         ;
                 cp      CMD_END                         ;
                 jr      z, end_vgm                      ;
@@ -213,13 +250,19 @@ parser:                                                 ;
 ; последними. HL свободен: его затирает get_byte в wr_ay8910.
 loc_0001:                                               ;
                 ld      hl, 0F1FAh                      ; L=$FA канонич., H=#F1 плагинный (чип 2)
+                ld      a, 16                           ; смещение теней чипа 2
                 jr      loc_0003                        ;
 loc_0002:                                               ;
                 ld      hl, 0F0FBh                      ; L=$FB канонич., H=#F0 плагинный (чип 1)
+                xor     a                               ; смещение теней чипа 1
 loc_0003:                                               ;
+                ld      (cur_ofs), a                    ;
                 ld      bc, AY_ADDR                     ;
                 out     (c), l                          ; канонический селект (f=0 - FM on)
                 out     (c), h                          ; плагинный селект #F0/#F1
+                ld      a, (conv_on)                    ; клок файла отличается от TSFM?
+                or      a                               ;
+                jp      nz, wr_2203                     ; да - через пересчёт частот
                                                         ;
 ;---------------------- AY write -----------------------;
 ; ---------------- Запись в AY-8910/8912 (команда 0xA0) ;
@@ -700,6 +743,7 @@ data_offset:
                 dec     hl
                 add     hl, bc
                 ld      (bufPos), hl
+                call    conv_init                       ; пересчёт клока YM2203 (см. ниже)
                 ld      de, 0
 ;---- включить FM-часть YM2203 каноническим селектом ----;
 ; Порт #FFFD, значение %111110cf: бит0 c=1 - первый чип, ;
@@ -1368,6 +1412,487 @@ loc_0025:
                 call    AY_reset
                 ret
                                                         ;
+;=============== Пересчёт клока YM2203: код =============;
+; Обработчик команд 0x55/0xA5 при включённом пересчёте.
+; Читает регистр и данные из потока и диспетчеризует. DE
+; (счётчик пауз парсера) сохраняется, exx не используется
+; (теневые регистры заняты циклом пауз do_wait).
+wr_2203:
+                call    get_byte
+                ld      (cnv_reg), a
+                call    get_byte
+                ld      (cnv_dat), a
+                push    de
+                call    cnv_disp
+                pop     de
+                ret
+cnv_disp:
+                ld      a, (cnv_reg)
+                cp      0Eh
+                jp      c, cnv_ssg                      ; SSG R0-R13
+                cp      0A0h
+                jr      c, cnv_pass
+                cp      0AFh
+                jr      c, cnv_fm                       ; частотные FM A0-AE
+cnv_pass:       ; всё остальное - без изменений
+                ld      a, (cnv_reg)
+                ld      bc, AY_ADDR
+                out     (c), a
+                ld      a, (cnv_dat)
+                ld      bc, AY_DATA
+                out     (c), a
+                ret
+;---------------- FM: A0-A2/A8-AA + латчи A4-A6/AC-AE ---;
+cnv_fm:
+                ld      a, (cnv_reg)
+                sub     0A0h
+                ld      c, a                            ; idx 0..14
+                and     3
+                cp      3
+                jr      z, cnv_pass                     ; A3/A7/AB - не частотные
+                ld      a, c                            ; HL = тень латча канала
+                and     3
+                ld      e, a
+                bit     3, c
+                jr      z, cnv_fm1
+                inc     e                               ; A8-AE: слоты ch3
+                inc     e
+                inc     e
+cnv_fm1:
+                ld      a, (cur_ofs)
+                add     a, 8
+                add     a, e
+                add     a, low cnv_shad
+                ld      l, a
+                ld      h, high cnv_shad
+                bit     2, c
+                jr      z, cnv_fmap
+                ; A4-A6/AC-AE: запомнить файловый латч, в порт не писать
+                ; (на OPN латч применяется только записью A0-A2/A8-AA)
+                ld      a, (cnv_dat)
+                ld      (hl), a
+                ret
+cnv_fmap:       ; A0-A2/A8-AA: пересчитать и выписать пару A4'+A0'
+                ld      a, (hl)                         ; файловый block/fnum-hi
+                ld      d, a
+                rrca
+                rrca
+                rrca
+                and     7
+                ld      (cnv_blk), a
+                ld      a, d
+                and     7
+                ld      d, a
+                ld      a, (cnv_dat)
+                ld      e, a                            ; DE = fnum файла (11 бит)
+                push    bc
+                ld      bc, CONV_TFM
+                call    cnv_scale                       ; HL = fnum*mant_fm>>16
+                pop     bc
+                ld      a, (conv_ef)
+                ld      b, a
+                ld      a, (cnv_blk)
+                add     a, b                            ; block' = block + exp_fm
+                jp      m, cnv_fmneg
+                cp      8
+                jr      c, cnv_fmok
+cnv_fmov:       ; block' > 7: удваиваем fnum, block' = 7
+                add     hl, hl
+                jr      c, cnv_fmsat
+                dec     a
+                cp      7
+                jr      nz, cnv_fmov
+                ld      a, h
+                cp      8
+                ld      a, 7
+                jr      c, cnv_fmok
+cnv_fmsat:      ld      hl, 07FFh                       ; выше некуда
+                ld      a, 7
+                jr      cnv_fmok
+cnv_fmneg:      ; block' < 0: делим fnum пополам, block' = 0
+                srl     h
+                rr      l
+                inc     a
+                jr      nz, cnv_fmneg
+cnv_fmok:       ; A = block' (0..7), HL = fnum' (< 0x800)
+                rlca
+                rlca
+                rlca
+                or      h
+                ld      d, a                            ; байт для A4'
+                ld      e, c                            ; idx
+                ld      a, e
+                add     a, 0A4h                         ; A4-A6 или AC-AE
+                ld      bc, AY_ADDR
+                out     (c), a
+                ld      bc, AY_DATA
+                out     (c), d
+                ld      a, e
+                add     a, 0A0h                         ; A0-A2 или A8-AA
+                ld      bc, AY_ADDR
+                out     (c), a
+                ld      bc, AY_DATA
+                out     (c), l
+                ret
+;---------------- SSG: R0-R5, R6, R11/R12 ---------------;
+cnv_ssg:
+                ld      a, (cnv_reg)
+                cp      6
+                jr      z, cnv_noise
+                jr      c, cnv_tone                     ; R0-R5
+                cp      0Bh
+                jr      z, cnv_env
+                cp      0Ch
+                jr      z, cnv_env
+                jp      cnv_pass                        ; R7-R10, R13-R15
+cnv_tone:       ; 12-битный период тона, пары R0/R1, R2/R3, R4/R5
+                ld      c, a
+                ld      a, (cur_ofs)
+                add     a, c
+                add     a, low cnv_shad
+                ld      l, a
+                ld      h, high cnv_shad
+                ld      a, (cnv_dat)
+                ld      (hl), a                         ; тень файлового значения
+                bit     0, c
+                jr      z, cnv_tn1
+                dec     hl                              ; на младший регистр пары
+                dec     c
+cnv_tn1:
+                ld      e, (hl)
+                inc     hl
+                ld      a, (hl)
+                and     0Fh
+                ld      d, a                            ; DE = период файла
+                call    cnv_sgscl                       ; HL = период'
+                ld      a, h                            ; кламп 12 бит
+                cp      10h
+                jr      c, cnv_tn2
+                ld      hl, 0FFFh
+cnv_tn2:
+                ex      de, hl
+                ld      a, c                            ; чётный регистр пары
+                jr      cnv_wr2
+cnv_noise:      ; 5-битный период шума
+                ld      a, (cnv_dat)
+                and     1Fh
+                ld      e, a
+                ld      d, 0
+                call    cnv_sgscl
+                ld      a, h
+                or      a
+                jr      nz, cnv_no1
+                ld      a, l
+                cp      20h
+                jr      c, cnv_no2
+cnv_no1:        ld      l, 1Fh                          ; кламп 31
+cnv_no2:        ld      a, 6
+                ld      bc, AY_ADDR
+                out     (c), a
+                ld      bc, AY_DATA
+                out     (c), l
+                ret
+cnv_env:        ; 16-битный период огибающей R11/R12
+                sub     0Bh
+                ld      c, a                            ; 0/1
+                ld      a, (cur_ofs)
+                add     a, 6
+                add     a, c
+                add     a, low cnv_shad
+                ld      l, a
+                ld      h, high cnv_shad
+                ld      a, (cnv_dat)
+                ld      (hl), a
+                bit     0, c
+                jr      z, cnv_ev1
+                dec     hl
+cnv_ev1:
+                ld      e, (hl)
+                inc     hl
+                ld      d, (hl)
+                call    cnv_sgscl                       ; кламп 16 бит внутри
+                ex      de, hl
+                ld      a, 0Bh
+cnv_wr2:        ; запись пары: регистр A <- E, регистр A+1 <- D
+                ld      h, a
+                ld      bc, AY_ADDR
+                out     (c), h
+                ld      bc, AY_DATA
+                out     (c), e
+                inc     h
+                ld      bc, AY_ADDR
+                out     (c), h
+                ld      bc, AY_DATA
+                out     (c), d
+                ret
+;---------------- масштабирование -----------------------;
+; cnv_sgscl: DE = значение -> HL = значение * mant_sg * 2^exp_sg
+; (кламп 16 бит). Портит A, DE; BC сохраняется.
+cnv_sgscl:
+                push    bc
+                ld      bc, CONV_TSG
+                call    cnv_scale
+                pop     bc
+                ld      a, (conv_es)
+                or      a
+                ret     z
+                jp      m, cnv_sgr
+cnv_sgl:        add     hl, hl
+                jr      c, cnv_sgsat
+                dec     a
+                jr      nz, cnv_sgl
+                ret
+cnv_sgsat:      ld      hl, 0FFFFh
+                ret
+cnv_sgr:        srl     h
+                rr      l
+                inc     a
+                jr      nz, cnv_sgr
+                ret
+; cnv_scale: DE = значение (16 бит), BC = таблица мантиссы ->
+; HL = значение*мантисса>>16 = TBL[D] + TBL[E]>>8. Портит A, DE.
+cnv_scale:
+                push    de
+                ld      l, d
+                ld      h, 0
+                add     hl, hl
+                add     hl, bc
+                ld      a, (hl)
+                inc     hl
+                ld      h, (hl)
+                ld      l, a                            ; HL = TBL[hi]
+                pop     de
+                push    hl
+                ld      l, e
+                ld      h, 0
+                add     hl, hl
+                add     hl, bc
+                ld      e, (hl)
+                inc     hl
+                ld      d, (hl)                         ; DE = TBL[lo]
+                pop     hl
+                ld      e, d
+                ld      d, 0
+                add     hl, de
+                ret
+;---------------- инициализация (из rd_header) ----------;
+; Портит все регистры - вызывается до ld de,0.
+conv_init:
+                xor     a
+                ld      (conv_on), a
+                ld      a, (chips_mask)
+                and     MSK_YM2203
+                ret     z
+                ; клок файла, 24 бита (бит30 dual-флаг живёт в 4-м байте)
+                ld      hl, BUFF_START + 44h
+                ld      a, (hl)
+                ld      (cnv_cf), a
+                inc     hl
+                ld      a, (hl)
+                ld      (cnv_cf+1), a
+                inc     hl
+                ld      a, (hl)
+                ld      (cnv_cf+2), a
+                ; |Cf - HW_CLOCK| < HW_CLOCK/32 (~3%) - пересчёт не нужен
+                ld      a, (cnv_cf)
+                sub     low HW_CLOCK
+                ld      l, a
+                ld      a, (cnv_cf+1)
+                sbc     a, high HW_CLOCK
+                ld      h, a
+                ld      a, (cnv_cf+2)
+                sbc     a, HW_CLOCK >> 16
+                jr      nc, ci_abs
+                ld      b, a                            ; отрицательное - взять модуль
+                xor     a
+                sub     l
+                ld      l, a
+                ld      a, 0
+                sbc     a, h
+                ld      h, a
+                ld      a, 0
+                sbc     a, b
+ci_abs:         ; A:HL = |Cf-HW|, порог HW/32 = $01B0F5 (сравнение грубое)
+                or      a
+                jr      z, ci_ret                       ; < 65536 - в пределах 3%
+                cp      1
+                jr      nz, ci_go                       ; >= 2*65536 - конвертим
+                ld      a, h
+                cp      0B1h
+                jr      nc, ci_go
+ci_ret:         ret
+ci_go:
+                ; FM: (Cf<<16)/HW -> мантисса+порядок -> таблица
+                call    ci_cf_dvd
+                call    ci_hw_dvs
+                call    cnv_div
+                call    cnv_norm
+                ld      (conv_ef), a
+                ld      hl, CONV_TFM
+                call    cnv_tbl
+                ; SSG: (HW<<16)/Cf
+                call    ci_hw_dvd
+                call    ci_cf_dvs
+                call    cnv_div
+                call    cnv_norm
+                ld      (conv_es), a
+                ld      hl, CONV_TSG
+                call    cnv_tbl
+                ; обнулить тени обоих чипов
+                ld      hl, cnv_shad
+                ld      b, 32
+                xor     a
+ci_clr:         ld      (hl), a
+                inc     hl
+                djnz    ci_clr
+                inc     a
+                ld      (conv_on), a
+                ret
+ci_cf_dvd:      ld      a, (cnv_cf)
+                ld      (cnv_dvd+2), a
+                ld      a, (cnv_cf+1)
+                ld      (cnv_dvd+3), a
+                ld      a, (cnv_cf+2)
+                ld      (cnv_dvd+4), a
+                ret
+ci_cf_dvs:      ld      a, (cnv_cf)
+                ld      (cnv_dvs), a
+                ld      a, (cnv_cf+1)
+                ld      (cnv_dvs+1), a
+                ld      a, (cnv_cf+2)
+                ld      (cnv_dvs+2), a
+                ret
+ci_hw_dvd:      ld      a, low HW_CLOCK
+                ld      (cnv_dvd+2), a
+                ld      a, high HW_CLOCK
+                ld      (cnv_dvd+3), a
+                ld      a, HW_CLOCK >> 16
+                ld      (cnv_dvd+4), a
+                ret
+ci_hw_dvs:      ld      a, low HW_CLOCK
+                ld      (cnv_dvs), a
+                ld      a, high HW_CLOCK
+                ld      (cnv_dvs+1), a
+                ld      a, HW_CLOCK >> 16
+                ld      (cnv_dvs+2), a
+                ret
+; cnv_div: cnv_q(24 бита) = (cnv_dvd[2..4] << 16) / cnv_dvs(24).
+; Классическое деление сдвигом-вычитанием, 40 итераций. Только
+; на инициализации, скорость не важна.
+cnv_div:
+                xor     a
+                ld      (cnv_dvd), a
+                ld      (cnv_dvd+1), a
+                ld      (cnv_q), a
+                ld      (cnv_q+1), a
+                ld      (cnv_q+2), a
+                ld      (cnv_acc), a
+                ld      (cnv_acc+1), a
+                ld      (cnv_acc+2), a
+                ld      b, 40
+cnv_dv1:        ; делимое <<= 1, старший бит уходит в перенос
+                ld      hl, cnv_dvd
+                sla     (hl)
+                inc     hl
+                rl      (hl)
+                inc     hl
+                rl      (hl)
+                inc     hl
+                rl      (hl)
+                inc     hl
+                rl      (hl)
+                ; остаток = остаток<<1 | перенос
+                ld      hl, cnv_acc
+                rl      (hl)
+                inc     hl
+                rl      (hl)
+                inc     hl
+                rl      (hl)
+                ; остаток >= делителя? вычесть, бит частного = 1
+                ld      a, (cnv_acc)
+                ld      hl, cnv_dvs
+                sub     (hl)
+                ld      e, a
+                ld      a, (cnv_acc+1)
+                inc     hl
+                sbc     a, (hl)
+                ld      d, a
+                ld      a, (cnv_acc+2)
+                inc     hl
+                sbc     a, (hl)
+                jr      c, cnv_dv2                      ; меньше - бит 0
+                ld      (cnv_acc+2), a
+                ld      a, e
+                ld      (cnv_acc), a
+                ld      a, d
+                ld      (cnv_acc+1), a
+                scf
+                jr      cnv_dv3
+cnv_dv2:        or      a                               ; бит частного = 0
+cnv_dv3:        ld      hl, cnv_q
+                rl      (hl)
+                inc     hl
+                rl      (hl)
+                inc     hl
+                rl      (hl)
+                djnz    cnv_dv1
+                ret
+; cnv_norm: нормализовать cnv_q (не 0): сдвиг влево до бита 23.
+; Мантисса (старшие 16 бит) -> cnv_mant, порядок -> A (знаковый).
+cnv_norm:
+                ld      c, 8
+cnv_nm1:        ld      a, (cnv_q+2)
+                bit     7, a
+                jr      nz, cnv_nm2
+                ld      hl, cnv_q
+                sla     (hl)
+                inc     hl
+                rl      (hl)
+                inc     hl
+                rl      (hl)
+                dec     c
+                jr      cnv_nm1
+cnv_nm2:        ld      a, (cnv_q+1)
+                ld      (cnv_mant), a
+                ld      a, (cnv_q+2)
+                ld      (cnv_mant+1), a
+                ld      a, c
+                ret
+; cnv_tbl: TBL[i] = (i*мантисса + 128) >> 8, i = 0..255, записи
+; 16-битные. HL = адрес таблицы.
+cnv_tbl:
+                xor     a
+                ld      (cnv_acc), a
+                ld      (cnv_acc+1), a
+                ld      (cnv_acc+2), a
+                ld      b, 0                            ; 256 итераций
+cnv_tb1:        ld      a, (cnv_acc)
+                add     a, 80h
+                ld      a, (cnv_acc+1)
+                adc     a, 0
+                ld      (hl), a
+                inc     hl
+                ld      a, (cnv_acc+2)
+                adc     a, 0
+                ld      (hl), a
+                inc     hl
+                ; аккумулятор += мантисса
+                ld      a, (cnv_acc)
+                ld      c, a
+                ld      a, (cnv_mant)
+                add     a, c
+                ld      (cnv_acc), a
+                ld      a, (cnv_acc+1)
+                ld      c, a
+                ld      a, (cnv_mant+1)
+                adc     a, c
+                ld      (cnv_acc+1), a
+                ld      a, (cnv_acc+2)
+                adc     a, 0
+                ld      (cnv_acc+2), a
+                djnz    cnv_tb1
+                ret
+                                                        ;
 ; ======================================================;
 ; ОТРИСОВКА СТАРТОВОГО ЭКРАНА/МЕНЮ ПЛЕЕРА.
 ; Очищает область экрана (0-0x7FF), красит атрибуты рамки текста
@@ -1687,8 +2212,11 @@ txt_mb:                 db "00.0 Mb",0                  ;
 txt_kb:                 db "000 Kb",0                   ;
 txt_notdet:             db "NOT DETECTED", 0            ;
                                                         ;
-BUFF_START:             EQU $9000                       ;
-BUFF_END:               EQU $92                         ;
+; Карта памяти: код/данные плагина $8000..<$9300 (проверяется
+; ASSERT'ом), рабочая область пересчёта клока $9300..$977F,
+; файловый буфер $9800..$99FF. Итого плагин занимает $8000-$99FF.
+BUFF_START:             EQU $9800                       ;
+BUFF_END:               EQU $9A                         ;
                                                         ;
 font:                   db $00, $00, $00, $00, $00, $00, $00, $00 ; Space
                         db $00, $20, $20, $20, $20, $00, $20, $00 ; !
@@ -1804,4 +2332,5 @@ font:                   db $00, $00, $00, $00, $00, $00, $00, $00 ; Space
                         db 0                                      ;
 endvgm:
 
+                        ASSERT endvgm <= CONV_TFM
                         SAVEBIN "VGM", vgm_start, endvgm - vgm_start

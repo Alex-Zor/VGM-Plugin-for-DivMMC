@@ -37,6 +37,16 @@
       get those selects last and are unaffected (note: the
       meaning of bit 0 in the canonical selects is opposite to
       the plugin-style ones).
+      YM2203 clock conversion: arcade VGM rips are logged for a
+      different chip clock (e.g. 1943 - 1.5 MHz) and used to
+      play about 15 semitones too high on TSFM (~3.55 MHz).
+      When the YM2203 clock in the VGM header differs from the
+      TSFM clock by more than ~3%, FM F-num/block values and SSG
+      tone/noise/envelope periods are rescaled on the fly by the
+      clock ratio, so such rips play at their original pitch.
+      Native TSFM rips (3.5/3.58 MHz) are passed through
+      untouched. The plugin now uses RAM up to #99FF (frequency
+      scaling tables and the file buffer moved to #9300-#99FF).
     0.62 (1 September 2026, by azesmbog)
       Added SAA1099 / 2x SAA1099 (VGM cmd 0xBD, ports #01FF/#00FF
       and #03FF/#02FF), YM2413 (cmd 0x51, ports #C0/#C1) and
