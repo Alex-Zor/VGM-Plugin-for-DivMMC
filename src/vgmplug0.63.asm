@@ -88,22 +88,31 @@ MSK_YM2413:             EQU 32                          ; YM2413
 ; тени файловых значений по обоим чипам (латчи A4-A6/AC-AE,
 ; SSG R0-R5, R11-R12).
 HW_CLOCK:               EQU 3546800                     ; клок YM2203 на TSFM (2x1773400)
-CONV_TFM:               EQU $9300                       ; таблица мантиссы FM (512 байт)
-CONV_TSG:               EQU $9500                       ; таблица мантиссы SSG (512 байт)
-conv_on:                EQU $9700                       ; 1 - пересчёт включён
-conv_ef:                EQU $9701                       ; exp_fm (знаковый)
-conv_es:                EQU $9702                       ; exp_sg (знаковый)
-cur_ofs:                EQU $9703                       ; 0/16 - смещение теней текущего чипа
-cnv_reg:                EQU $9704                       ; регистр текущей команды
-cnv_dat:                EQU $9705                       ; данные текущей команды
-cnv_mant:               EQU $9706                       ; 2 байта: мантисса (0.16)
-cnv_q:                  EQU $9708                       ; 3 байта: частное деления
-cnv_dvd:                EQU $970B                       ; 5 байт: делимое (X<<16)
-cnv_dvs:                EQU $9710                       ; 3 байта: делитель
-cnv_acc:                EQU $9713                       ; 3 байта: остаток/аккумулятор
-cnv_cf:                 EQU $9716                       ; 3 байта: клок файла
-cnv_blk:                EQU $9719                       ; block текущей FM-записи
-cnv_shad:               EQU $9720                       ; 2x16 байт теней (чип1/чип2):
+; Тот же пересчёт делается и для AY-3-8910 (команда 0xA0): клок из
+; заголовка +0x74 против AY_CLOCK. Лечит рипы Amstrad CPC (1 МГц,
+; +9.9 полутона), Atari ST (2 МГц), Vectrex (1.5 МГц) и т.п.
+AY_CLOCK:               EQU 1773400                     ; клок AY на ZX
+CONV_TFM:               EQU $9300                       ; таблица мантиссы FM YM2203 (512 байт)
+CONV_TSG:               EQU $9500                       ; таблица мантиссы SSG YM2203 (512 байт)
+CONV_TAY:               EQU $9700                       ; таблица мантиссы AY (512 байт)
+conv_on:                EQU $9900                       ; 1 - пересчёт YM2203 включён
+conv_ef:                EQU $9901                       ; exp_fm (знаковый)
+conv_es:                EQU $9902                       ; exp_sg YM2203 (знаковый)
+cur_ofs:                EQU $9903                       ; 0/16/32 - смещение теней текущего чипа
+cnv_reg:                EQU $9904                       ; регистр текущей команды
+cnv_dat:                EQU $9905                       ; данные текущей команды
+cnv_mant:               EQU $9906                       ; 2 байта: мантисса (0.16)
+cnv_q:                  EQU $9908                       ; 3 байта: частное деления
+cnv_dvd:                EQU $990B                       ; 5 байт: делимое (X<<16)
+cnv_dvs:                EQU $9910                       ; 3 байта: делитель
+cnv_acc:                EQU $9913                       ; 3 байта: остаток/аккумулятор
+cnv_cf:                 EQU $9916                       ; 3 байта: клок файла
+cnv_blk:                EQU $9919                       ; block текущей FM-записи
+conv_ay_on:             EQU $991A                       ; 1 - пересчёт AY включён
+conv_ea:                EQU $991B                       ; exp AY (знаковый)
+cur_tab:                EQU $991C                       ; старший байт текущей SSG-таблицы
+cur_exp:                EQU $991D                       ; порядок текущего SSG-масштаба
+cnv_shad:               EQU $9920                       ; 3x16 байт теней (2203 чип1/чип2, AY):
 ; +0..+5 SSG R0-R5, +6/+7 R11/R12, +8..+10 латчи A4-A6, +11..+13 латчи AC-AE
                                                         ;
 ;====================== ENTRY ==========================;
@@ -207,7 +216,7 @@ parser:                                                 ;
                 jp      z, wr_ymf262_1                  ;
                                                         ;
                 cp      CMD_AY8910                      ;
-                jr      z, wr_ay8910                    ;
+                jp      z, wr_ay                        ; через проверку пересчёта клока
                                                         ;                                                        ;
                 cp      CMD_SAA1099                     ;
                 jr      z, wr_saa1099                   ;
@@ -1412,11 +1421,33 @@ loc_0025:
                 call    AY_reset
                 ret
                                                         ;
-;=============== Пересчёт клока YM2203: код =============;
-; Обработчик команд 0x55/0xA5 при включённом пересчёте.
-; Читает регистр и данные из потока и диспетчеризует. DE
-; (счётчик пауз парсера) сохраняется, exx не используется
-; (теневые регистры заняты циклом пауз do_wait).
+;============ Пересчёт клока YM2203/AY: код =============;
+; Обработчики команд 0x55/0xA5 (YM2203) и 0xA0 (AY) при
+; включённом пересчёте. Читают регистр и данные из потока и
+; диспетчеризуют. DE (счётчик пауз парсера) сохраняется, exx
+; не используется (теневые регистры заняты циклом пауз do_wait).
+; --- AY (0xA0): проверка флага и обёртка ---
+wr_ay:
+                ld      a, (conv_ay_on)
+                or      a
+                jp      z, wr_ay8910                    ; клок родной - старый путь
+                call    get_byte
+                ld      (cnv_reg), a
+                call    get_byte
+                ld      (cnv_dat), a
+                push    de
+                call    cnv_disp_ay
+                pop     de
+                ret
+cnv_disp_ay:    ; параметры SSG-масштаба AY + свой слот теней
+                ld      a, 32
+                ld      (cur_ofs), a
+                ld      a, high CONV_TAY
+                ld      (cur_tab), a
+                ld      a, (conv_ea)
+                ld      (cur_exp), a
+                jp      cnv_ssg_e
+; --- YM2203 (0x55/0xA5) ---
 wr_2203:
                 call    get_byte
                 ld      (cnv_reg), a
@@ -1535,7 +1566,12 @@ cnv_fmok:       ; A = block' (0..7), HL = fnum' (< 0x800)
                 out     (c), l
                 ret
 ;---------------- SSG: R0-R5, R6, R11/R12 ---------------;
-cnv_ssg:
+cnv_ssg:        ; вход YM2203: выставить его SSG-таблицу и порядок
+                ld      a, high CONV_TSG
+                ld      (cur_tab), a
+                ld      a, (conv_es)
+                ld      (cur_exp), a
+cnv_ssg_e:      ; общий SSG-диспетчер (YM2203 и AY)
                 ld      a, (cnv_reg)
                 cp      6
                 jr      z, cnv_noise
@@ -1626,14 +1662,17 @@ cnv_wr2:        ; запись пары: регистр A <- E, регистр A
                 out     (c), d
                 ret
 ;---------------- масштабирование -----------------------;
-; cnv_sgscl: DE = значение -> HL = значение * mant_sg * 2^exp_sg
-; (кламп 16 бит). Портит A, DE; BC сохраняется.
+; cnv_sgscl: DE = значение -> HL = значение * мантисса * 2^порядок
+; текущего SSG-масштаба (cur_tab/cur_exp, выставляются на входе в
+; cnv_ssg и cnv_disp_ay). Кламп 16 бит. Портит A, DE; BC сохраняется.
 cnv_sgscl:
                 push    bc
-                ld      bc, CONV_TSG
+                ld      a, (cur_tab)
+                ld      b, a
+                ld      c, 0                            ; таблицы выровнены на страницу
                 call    cnv_scale
                 pop     bc
-                ld      a, (conv_es)
+                ld      a, (cur_exp)
                 or      a
                 ret     z
                 jp      m, cnv_sgr
@@ -1680,6 +1719,10 @@ cnv_scale:
 conv_init:
                 xor     a
                 ld      (conv_on), a
+                ld      (conv_ay_on), a
+                call    ci_2203
+                jp      ci_ay
+ci_2203:
                 ld      a, (chips_mask)
                 and     MSK_YM2203
                 ret     z
@@ -1748,6 +1791,70 @@ ci_clr:         ld      (hl), a
                 inc     a
                 ld      (conv_on), a
                 ret
+;---------------- инициализация AY ----------------------;
+ci_ay:
+                ld      a, (chips_mask)
+                and     MSK_AY
+                ret     z
+                ; клок AY из заголовка +0x74 (24 бита)
+                ld      hl, BUFF_START + 74h
+                ld      a, (hl)
+                ld      (cnv_cf), a
+                inc     hl
+                ld      a, (hl)
+                ld      (cnv_cf+1), a
+                inc     hl
+                ld      a, (hl)
+                ld      (cnv_cf+2), a
+                ; |Cf - AY_CLOCK| < AY_CLOCK/32 (~3%) - пересчёт не нужен
+                ld      a, (cnv_cf)
+                sub     low AY_CLOCK
+                ld      l, a
+                ld      a, (cnv_cf+1)
+                sbc     a, high AY_CLOCK
+                ld      h, a
+                ld      a, (cnv_cf+2)
+                sbc     a, AY_CLOCK >> 16
+                jr      nc, ciay_abs
+                ld      b, a                            ; отрицательное - взять модуль
+                xor     a
+                sub     l
+                ld      l, a
+                ld      a, 0
+                sbc     a, h
+                ld      h, a
+                ld      a, 0
+                sbc     a, b
+ciay_abs:       ; A:HL = |Cf-AY|, порог AY_CLOCK/32 = $00D87A (грубо по H)
+                or      a
+                jr      nz, ciay_go                     ; >= 65536 - конвертим
+                ld      a, h
+                cp      high (AY_CLOCK/32)
+                jr      c, ciay_ret
+ciay_go:
+                ; (AY_CLOCK<<16)/Cf -> мантисса+порядок -> таблица
+                ld      a, low AY_CLOCK
+                ld      (cnv_dvd+2), a
+                ld      a, high AY_CLOCK
+                ld      (cnv_dvd+3), a
+                ld      a, AY_CLOCK >> 16
+                ld      (cnv_dvd+4), a
+                call    ci_cf_dvs
+                call    cnv_div
+                call    cnv_norm
+                ld      (conv_ea), a
+                ld      hl, CONV_TAY
+                call    cnv_tbl
+                ; обнулить тень AY (третий слот)
+                ld      hl, cnv_shad+32
+                ld      b, 16
+                xor     a
+ciay_clr:       ld      (hl), a
+                inc     hl
+                djnz    ciay_clr
+                inc     a
+                ld      (conv_ay_on), a
+ciay_ret:       ret
 ci_cf_dvd:      ld      a, (cnv_cf)
                 ld      (cnv_dvd+2), a
                 ld      a, (cnv_cf+1)
@@ -2213,10 +2320,10 @@ txt_kb:                 db "000 Kb",0                   ;
 txt_notdet:             db "NOT DETECTED", 0            ;
                                                         ;
 ; Карта памяти: код/данные плагина $8000..<$9300 (проверяется
-; ASSERT'ом), рабочая область пересчёта клока $9300..$977F,
-; файловый буфер $9800..$99FF. Итого плагин занимает $8000-$99FF.
-BUFF_START:             EQU $9800                       ;
-BUFF_END:               EQU $9A                         ;
+; ASSERT'ом), рабочая область пересчёта клока $9300..$994F,
+; файловый буфер $9A00..$9BFF. Итого плагин занимает $8000-$9BFF.
+BUFF_START:             EQU $9A00                       ;
+BUFF_END:               EQU $9C                         ;
                                                         ;
 font:                   db $00, $00, $00, $00, $00, $00, $00, $00 ; Space
                         db $00, $20, $20, $20, $20, $00, $20, $00 ; !

@@ -45,8 +45,15 @@
       tone/noise/envelope periods are rescaled on the fly by the
       clock ratio, so such rips play at their original pitch.
       Native TSFM rips (3.5/3.58 MHz) are passed through
-      untouched. The plugin now uses RAM up to #99FF (frequency
-      scaling tables and the file buffer moved to #9300-#99FF).
+      untouched.
+      The same clock conversion is applied to AY-3-8910 rips
+      logged for a non-ZX clock (header offset 0x74): Amstrad
+      CPC 1 MHz (about +10 semitones on ZX), Atari ST 2 MHz,
+      Vectrex 1.5 MHz now play at their original pitch;
+      ZX/Pentagon/MSX-clock rips (within ~3% of 1.7734 MHz) are
+      passed through untouched.
+      The plugin now uses RAM up to #9BFF (frequency scaling
+      tables and the file buffer moved to #9300-#9BFF).
     0.62 (1 September 2026, by azesmbog)
       Added SAA1099 / 2x SAA1099 (VGM cmd 0xBD, ports #01FF/#00FF
       and #03FF/#02FF), YM2413 (cmd 0x51, ports #C0/#C1) and
