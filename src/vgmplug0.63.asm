@@ -5,10 +5,21 @@
                         ORG 08000h                      ;
 vgm_start:                                              ;
 ;====================== Plugin header ==================;
-                        db "PLUG", 0                    ;
-                        dw entry_point                  ; entry point
-                        db "VGM"                        ;
-                        ds 9                            ;
+						jr entry_point:                 ;
+plugin_info:                                            ;
+						db "BP"							; id
+						db 0							; spare
+						db 0							; spare
+						db PLUGIN_FLAGS1_COPY_SETTINGS	; flags
+						db 0							; flags2
+plugin_user_data:                                       ;
+						db PLUGIN_SETTING_MAX			; reserve space for settings copy
+plugin_id_string:                                       ;  
+						defb ".VGM file plugin 0.63"
+						defb "- by Alex Zor", $0        ;
+;==================== Plugin ===========================;
+PLUGIN_SETTING_MAX:				EQU 14				    ;
+PLUGIN_FLAGS1_COPY_SETTINGS:	EQU 1				    ;
                                                         ;
 ;====================== ESXDOS =========================;
 ESXDOS_GETSETDRV:       EQU $89                         ;
@@ -120,19 +131,14 @@ cur_exp:                EQU $991D                       ; порядок тек�
 cnv_shad:               EQU $9920                       ; 3x16 байт теней (2203 чип1/чип2, AY):
                                                         ; +0..+5 SSG R0-R5, +6/+7 R11/R12,
 ;====================== ENTRY ==========================; +8..+10 латчи A4-A6, +11..+13 латчи AC-AE
-entry_point:                                            ;
-                jr      start                           ;
-                db      " < ver0.63 by AlexZor > "      ;
-                                                        ;
+
 ; ======================================================;
 ; ТОЧКА ВХОДА ПЛАГИНА esxDOS.                           ;
 ; Сохраняет IX/IY, запрашивает у esxDOS текущий диск (drive),
 ; показывает меню/оформление экрана, запускает воспроизведение
 ; файла и переход к следующему, восстанавливает регистры и выходит.
 ; ======================================================;
-start:          di                                      ;
-                push    ix                              ;
-                push    iy                              ;
+entry_point:    di                                      ;
                 ld      (entryFile), hl                 ;
                 ld      a, 0                            ;
                 ld      b, 0                            ;
@@ -142,8 +148,6 @@ start:          di                                      ;
                 call    menu                            ;
                 call    play_file                       ;
                 call    next_file                       ;
-                pop     iy                              ;
-                pop     ix                              ;
                 ei                                      ;
                 ret                                     ;
                                                         ;
@@ -1412,7 +1416,13 @@ lp_ff15:                                                ;
                 out     (c), a                          ;
                 inc     d                               ;
                 pop     bc                              ;
-                djnz    lp_ff15                         ;
+                djnz    lp_ff15                         ;										 
+				ld      a, 2Dh                          ; reset prescaler
+                ld      bc, AY_ADDR                     ;
+                out     (c), a                          ;
+                xor     a                               ;
+                ld      bc, AY_DATA                     ;
+                out     (c), a                          ;													  
                 call    AY_reset                        ;
                 ret                                     ;
                                                         ;
@@ -2127,10 +2137,27 @@ clear_text:     ld      de, 900h                        ;
 ; символы с кодом 32 = ' ' и далее).
 ; ======================================================;
 print_char:                                             ;
-                ex      de, hl                          ; HL -VRAM
-; a - char                                              ;
-                ld      c, l                            ;
-                                                        ;
+                ld      c, e                            ;
+                ld      b, a                            ;
+                ld      a, e                            ;
+                add     a, a                            ;
+                ld      l, a                            ;
+                add     a, a                            ;
+				add     a, l                            ;	
+                add     a, 2                            ;
+    .3          rra                                     ;
+                and     1Fh                             ;
+                ld      e, a                            ;
+                ld      a, d                            ;
+                and     7                               ;
+    .3          rrca                                    ;
+                add     a, e                            ;
+                ld      e, a                            ;
+                ld      a, d                            ;
+                and     18h                             ;
+                or      40h                             ;
+                ld      d, a                            ;
+                ld      a, b                            ;
                 sub     32                              ; shift to start table
                 ld      l, a                            ;
                 ld      h, 0                            ;
@@ -2139,21 +2166,15 @@ print_char:                                             ;
     .3          add     hl, hl                          ;
                 ld      bc, font                        ;
                 add     hl, bc                          ;
-                and     3                               ;
-                cp      0                               ;
-                jr      z, pos0                         ;
-                                                        ;
+                ld      b, 8                            ;
+                and     3h                              ;
                 cp      1                               ;
                 jr      z, pos1                         ;
-                                                        ;
                 cp      2                               ;
                 jr      z, pos2                         ;
-                                                        ;
                 cp      3                               ;
                 jr      z, pos3                         ;
 pos0:                                                   ;
-                ld      b, 8                            ;
-lp_pos0:                                                ;
                 ld      a, (de)                         ;
                 and     0C0h                            ;
                 ld      c, (hl)                         ;
@@ -2163,29 +2184,25 @@ lp_pos0:                                                ;
                 ld      (de), a                         ;
                 inc     hl                              ;
                 inc     d                               ;
-                djnz    lp_pos0                         ;
+                djnz    pos0                            ;
                 ret                                     ;
                                                         ;
 ;-------------------------------------------------------;
 pos1:                                                   ;
-                ld      b, 8                            ;
-lp_pos1:                                                ;
                 ld      a, (de)                         ;
-                and     3                               ;
+                and     03h                             ;
                 ld      c, (hl)                         ;
                 or      c                               ;
                 ld      (de), a                         ;
                 inc     hl                              ;
                 inc     d                               ;
-                djnz    lp_pos1                         ;
+                djnz    pos1                            ;
                 ret                                     ;
 ;-------------------------------------------------------;
 pos2:                                                   ;
-                ld      b, 8                            ;
-lp_pos2:                                                ;
                 ld      a, (hl)                         ;
     .2          rlc     a                               ;
-                and     3                               ;
+                and     03h                             ;
                 ld      c, a                            ;
                 ld      a, (de)                         ;
                 and     0FCh                            ;
@@ -2202,15 +2219,13 @@ lp_pos2:                                                ;
                 dec     e                               ;
                 inc     d                               ;
                 inc     hl                              ;
-                djnz    lp_pos2                         ;
+                djnz    pos2                            ;
                 ret                                     ;
-                                                        ;
 ;-------------------------------------------------------;
 pos3:                                                   ;
-                ld      b, 8                            ;
-lp_pos3:                                                ;
                 ld      a, (hl)                         ;
-    .4          srl     a                               ;
+    .4          rrca                                    ;
+                and     0Fh                             ;
                 ld      c, a                            ;
                 ld      a, (de)                         ;
                 and     0F0h                            ;
@@ -2218,7 +2233,8 @@ lp_pos3:                                                ;
                 ld      (de), a                         ;
                 inc     e                               ;
                 ld      a, (hl)                         ;
-    .4          sla     a                               ;
+    .4          rlca                                    ;
+                and     0F0h                            ;
                 ld      c, a                            ;
                 ld      a, (de)                         ;
                 and     3Fh                             ;
@@ -2227,7 +2243,7 @@ lp_pos3:                                                ;
                 dec     e                               ;
                 inc     d                               ;
                 inc     hl                              ;
-                djnz    lp_pos3                         ;
+                djnz    pos3                            ;
                 ret                                     ;
                                                         ;
 ;------------------ Print string -----------------------;
@@ -2237,24 +2253,9 @@ lp_pos3:                                                ;
 ; координату и указатель на строку, пока не встретит 0. ;
 ; ======================================================;
 print:                                                  ;
-                ld      a, (bc)                         ; BC - string addr
+                ld      a, (bc)                         ;
                 or      a                               ;
                 ret     z                               ;
-                                                        ;
-                push    af                              ;
-                push    de                              ;
-                ld      a, e                            ;
-                and     3Fh                             ;
-                add     a, a                            ;
-                ld      l, a                            ;
-                add     a, a                            ;
-                add     a, l                            ;
-                add     a, 2                            ;
-    .3          srl     a                               ;
-                ld      e, a                            ;
-                call    calc_scr_addr                   ;
-                pop     de                              ;
-                pop     af                              ;
                 push    de                              ;
                 push    bc                              ;
                 call    print_char                      ;
