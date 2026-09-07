@@ -19,6 +19,8 @@
     Expect bugs, incomplete features, and limited compatibility.
 
 -Change history
+    0.63 (7 September 2026)
+      Add YM2203 pre-scaler reset. Optimize character rendering.
     0.63 (2 September 2026)
       sound_off now mutes every chip declared in the VGM header
       (chips_mask), not only the chip shown in the "Chip:" line:
